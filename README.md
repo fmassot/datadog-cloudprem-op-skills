@@ -1,39 +1,18 @@
 # Datadog CloudPrem & Observability Pipelines Skills
 
-Official AI assistant skills for deploying and managing Datadog CloudPrem and Observability Pipelines across cloud platforms.
+AI assistant skills for deploying and managing [Datadog CloudPrem](https://docs.datadoghq.com/cloudprem/) and [Observability Pipelines](https://docs.datadoghq.com/observability_pipelines/) across cloud platforms.
 
 ## Overview
 
-This repository contains two comprehensive AI skills designed to help you deploy, configure, and operate Datadog solutions with AI assistants like Claude Code and Gemini CLI:
+This repository contains two skills designed to help you deploy, configure, and operate Datadog solutions with AI assistants like Claude Code and Gemini CLI:
 
-### 🔷 CloudPrem Plugin
-Deploy and manage Datadog CloudPrem on Kubernetes (AWS EKS, Azure AKS, Google GKE, vanilla K8s). Get expert guidance on deployment, scaling, debugging, monitoring, and upgrades.
+- CloudPrem plugin: Deploy and manage Datadog CloudPrem on Kubernetes (AWS EKS, Azure AKS, Google GKE, vanilla K8s). Get expert guidance on deployment, scaling, debugging, monitoring, and upgrades.
 
-### 🔶 Observability Pipelines Plugin
-Deploy and manage Datadog Observability Pipelines on AWS EC2, Fargate, EKS, Azure AKS, Google GKE, and Kubernetes. API-first configuration for log processing, routing, filtering, and PII redaction.
-
-## Features
-
-### CloudPrem Plugin
-- Kubernetes deployment across all major cloud providers
-- Architecture sizing and resource planning
-- Scaling strategies (manual and autoscaling)
-- Comprehensive debugging workflows
-- Monitoring and alerting setup
-- Version upgrades and maintenance
-
-### Observability Pipelines Plugin
-- Multi-platform deployment (EC2, Fargate, Kubernetes)
-- API-driven pipeline configuration
-- Log filtering, sampling, and deduplication
-- Sensitive data redaction (PII scrubbing)
-- Multi-destination routing (dual-shipping to CloudPrem + Datadog)
-- Buffer management and reliability
-- Comprehensive troubleshooting guides
+- Observability Pipelines Plugin: Deploy and manage Datadog Observability Pipelines on AWS EC2, Fargate, EKS, Azure AKS, Google GKE, and Kubernetes. API-first configuration for log processing, routing, filtering, and PII redaction.
 
 ## Installation
 
-Choose your AI assistant platform:
+Choose your AI assistant:
 
 ### Claude Code
 
