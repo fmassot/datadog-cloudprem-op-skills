@@ -22,7 +22,20 @@ Ask the user what they need help with:
 - **Upgrades** - Version upgrades or configuration changes
 - **General questions** - Architecture, sizing, best practices
 
-Then provide platform-specific or task-specific guidance.
+### CRITICAL: For deployments, ALWAYS follow the step-by-step workflow below
+
+When deploying CloudPrem, you MUST guide users through these steps IN ORDER:
+1. Create Kubernetes cluster
+2. Create object storage bucket
+3. Create PostgreSQL database (ALWAYS recommend managed databases on cloud providers)
+4. Configure IAM/access control
+5. Create Kubernetes secrets
+6. Helm install CloudPrem
+7. Install Datadog Cluster Agent (with DogStatsD for metrics + log forwarding)
+8. Verify deployment and check metrics
+9. (Optional) Cleanup instructions
+
+Do not skip steps or assume infrastructure already exists. Each step builds on the previous one.
 
 ---
 
@@ -44,75 +57,290 @@ Then provide platform-specific or task-specific guidance.
 
 ## Deployment Guidance
 
-### Prerequisites (all platforms)
-- kubectl configured for the target cluster
-- helm 3+ installed
-- Kubernetes 1.25+
-- PostgreSQL database (managed or self-hosted)
-- Object storage (S3, GCS, Azure Blob, or S3-compatible like MinIO)
+**IMPORTANT**: Always follow these steps in order. Do not skip steps or assume infrastructure already exists.
 
-### Platform-specific prerequisites
+### Prerequisites
+
+**Required tools:**
+- kubectl 1.25+ configured
+- helm 3+ installed
+- Cloud CLI for your platform (aws/az/gcloud)
+- Datadog API and APP keys from https://app.datadoghq.com/organization-settings/api-keys
+
+### Step-by-Step Deployment Workflow
+
+Follow these steps IN ORDER for all platforms:
+
+#### Step 1: Create Kubernetes Cluster
 
 **AWS EKS:**
-- AWS CLI configured with proper credentials
-- Eksctl CLI configured with proper credentials
-- EKS cluster with AWS Load Balancer Controller installed
-- RDS PostgreSQL instance (recommend db.t4g.medium with Multi-AZ)
-- S3 bucket for log storage
-- IAM roles configured for IRSA (IAM Roles for Service Accounts)
+```bash
+eksctl create cluster \
+  --name cloudprem-cluster \
+  --region us-east-1 \
+  --version 1.28 \
+  --nodegroup-name standard-workers \
+  --node-type m5.xlarge \
+  --nodes 3 \
+  --nodes-min 3 \
+  --nodes-max 6 \
+  --managed \
+  --with-oidc
+```
 
 **Azure AKS:**
-- Azure CLI configured with proper credentials
-- AKS cluster
-- Azure Database for PostgreSQL Flexible Server
-- Azure Blob Storage account and container
-- Managed Identity or service principal for storage access
-- Azure Load Balancer or Application Gateway
+```bash
+az aks create \
+  --resource-group cloudprem-rg \
+  --name cloudprem-cluster \
+  --location eastus \
+  --node-count 3 \
+  --node-vm-size Standard_D4s_v3 \
+  --enable-managed-identity \
+  --enable-addons monitoring \
+  --generate-ssh-keys
+```
 
 **Google GKE:**
-- gcloud CLI configured with proper credentials
-- GKE cluster
-- Cloud SQL PostgreSQL instance (recommend db-custom-2-7680 with HA)
-- GCS bucket for log storage
-- Workload Identity configured for GCS access
+```bash
+gcloud container clusters create cloudprem-cluster \
+  --region us-central1 \
+  --node-locations us-central1-a,us-central1-b,us-central1-c \
+  --num-nodes 1 \
+  --machine-type n1-standard-4 \
+  --disk-type pd-ssd \
+  --disk-size 100 \
+  --enable-autorepair \
+  --enable-autoupgrade \
+  --enable-ip-alias \
+  --workload-pool=PROJECT_ID.svc.id.goog \
+  --release-channel stable
+```
 
-**Vanilla Kubernetes:**
-- NGINX Ingress Controller installed (or another ingress controller)
-- PostgreSQL (self-hosted or managed)
-- S3-compatible storage (MinIO, Ceph, or cloud S3)
-- Storage credentials (access keys or service accounts)
-- Storage classes for persistent volumes
-- cert-manager for TLS (recommended)
+**Cluster sizing recommendations:**
+- **Small (Dev/Test)**: 3 nodes, 4 vCPU/node (~100GB/day)
+- **Medium (Production)**: 5 nodes, 8 vCPU/node (~500GB/day)
+- **Large (Enterprise)**: 7+ nodes, 16 vCPU/node (~1TB+/day)
 
-### Deployment Steps
+**Get cluster credentials:**
+```bash
+# AWS
+aws eks update-kubeconfig --name cloudprem-cluster --region us-east-1
 
-Guide users through:
+# Azure
+az aks get-credentials --resource-group cloudprem-rg --name cloudprem-cluster
 
-1. **Infrastructure setup** (platform-specific):
-   - Create/verify database (RDS, Cloud SQL, Azure DB, or self-hosted)
-   - Create/verify object storage (S3, GCS, Blob, MinIO)
-   - Set up access control (IRSA, Workload Identity, Managed Identity, or access keys)
-   - Configure ingress (ALB, GCE LB, Azure LB, NGINX)
+# GCP
+gcloud container clusters get-credentials cloudprem-cluster --region us-central1
+```
 
-2. **Helm installation**:
-   ```bash
-   # Add Datadog repo
-   helm repo add datadog https://helm.datadoghq.com
-   helm repo update
+Verify:
+```bash
+kubectl cluster-info
+kubectl get nodes
+```
 
-   # Create namespace
-   kubectl create namespace <NAMESPACE>
+#### Step 2: Create Object Storage Bucket
 
-   # Create metastore secret
-   kubectl create secret generic cloudprem-metastore-uri \
-     -n <NAMESPACE> \
-     --from-literal=QW_METASTORE_URI=postgres://<USER>:<PASS>@<HOST>:<PORT>/<DB>
+**AWS S3:**
+```bash
+aws s3 mb s3://cloudprem-data-YOUR_ACCOUNT_ID --region us-east-1
+aws s3api put-bucket-versioning --bucket cloudprem-data-YOUR_ACCOUNT_ID --versioning-configuration Status=Enabled
+```
 
-   # Show default values
-   helm show values datadog/cloudprem
-   ```
+**Azure Blob Storage:**
+```bash
+az storage account create \
+  --name cloudpremdata \
+  --resource-group cloudprem-rg \
+  --location eastus \
+  --sku Standard_LRS
 
-3. **Create datadog-values.yaml** (customize based on platform):
+az storage container create \
+  --name cloudprem-data \
+  --account-name cloudpremdata
+```
+
+**Google Cloud Storage:**
+```bash
+gsutil mb -p PROJECT_ID -c STANDARD -l us-central1 gs://cloudprem-data-PROJECT_ID
+gsutil versioning set on gs://cloudprem-data-PROJECT_ID
+```
+
+Verify:
+```bash
+# AWS
+aws s3 ls s3://cloudprem-data-YOUR_ACCOUNT_ID
+
+# Azure
+az storage container show --name cloudprem-data --account-name cloudpremdata
+
+# GCP
+gsutil ls -L gs://cloudprem-data-PROJECT_ID
+```
+
+#### Step 3: Create PostgreSQL Database
+
+**ALWAYS recommend managed database services on cloud providers for better reliability, backups, and HA.**
+
+**AWS RDS PostgreSQL:**
+```bash
+aws rds create-db-instance \
+  --db-instance-identifier cloudprem-postgres \
+  --db-instance-class db.t4g.medium \
+  --engine postgres \
+  --engine-version 15.4 \
+  --master-username postgres \
+  --master-user-password 'SECURE_PASSWORD' \
+  --allocated-storage 100 \
+  --storage-type gp3 \
+  --backup-retention-period 7 \
+  --multi-az \
+  --publicly-accessible \
+  --vpc-security-group-ids sg-XXXXX
+```
+
+**Azure Database for PostgreSQL:**
+```bash
+az postgres flexible-server create \
+  --name cloudprem-postgres \
+  --resource-group cloudprem-rg \
+  --location eastus \
+  --admin-user postgres \
+  --admin-password 'SECURE_PASSWORD' \
+  --sku-name Standard_D2s_v3 \
+  --version 15 \
+  --storage-size 128 \
+  --backup-retention 7 \
+  --high-availability Enabled
+```
+
+**Google Cloud SQL PostgreSQL:**
+```bash
+# Generate secure password
+DB_PASSWORD=$(openssl rand -base64 32)
+echo "Database password: ${DB_PASSWORD}"  # Save this!
+
+# Create Cloud SQL instance
+gcloud sql instances create cloudprem-postgres \
+  --database-version=POSTGRES_15 \
+  --tier=db-custom-2-7680 \
+  --region=us-central1 \
+  --root-password="${DB_PASSWORD}" \
+  --storage-type=SSD \
+  --storage-size=100GB \
+  --storage-auto-increase \
+  --backup
+```
+
+**Create database:**
+```bash
+# AWS
+aws rds create-db-database --db-instance-identifier cloudprem-postgres --database-name cloudprem
+
+# Azure
+az postgres flexible-server db create \
+  --resource-group cloudprem-rg \
+  --server-name cloudprem-postgres \
+  --database-name cloudprem
+
+# GCP
+gcloud sql databases create cloudprem --instance=cloudprem-postgres
+```
+
+**Get connection details and save them:**
+```bash
+# AWS
+aws rds describe-db-instances --db-instance-identifier cloudprem-postgres \
+  --query 'DBInstances[0].Endpoint.Address' --output text
+
+# Azure
+az postgres flexible-server show \
+  --resource-group cloudprem-rg \
+  --name cloudprem-postgres \
+  --query fullyQualifiedDomainName -o tsv
+
+# GCP
+gcloud sql instances describe cloudprem-postgres \
+  --format="value(connectionName,ipAddresses[0].ipAddress)"
+```
+
+#### Step 4: Configure IAM/Access Control
+
+**AWS - IRSA (IAM Roles for Service Accounts):**
+```bash
+# Create IAM policy for S3 and RDS access
+# Create OIDC provider for EKS
+# Create IAM role and trust relationship
+# Annotate Kubernetes service account
+```
+
+**Azure - Workload Identity:**
+```bash
+# Create managed identity
+# Assign Storage Blob Data Contributor role
+# Federate identity with AKS
+```
+
+**Google - Workload Identity:**
+```bash
+# Create GCP service account
+gcloud iam service-accounts create cloudprem-sa \
+  --display-name="CloudPrem Service Account"
+
+# Grant Cloud SQL Client role
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:cloudprem-sa@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/cloudsql.client"
+
+# Grant Storage Object Admin role
+gsutil iam ch \
+  serviceAccount:cloudprem-sa@PROJECT_ID.iam.gserviceaccount.com:objectAdmin \
+  gs://cloudprem-data-PROJECT_ID
+
+# Create Kubernetes namespace and service account
+kubectl create namespace datadog-cloudprem
+kubectl create serviceaccount cloudprem-ksa -n datadog-cloudprem
+
+# Bind GCP SA to K8s SA
+gcloud iam service-accounts add-iam-policy-binding \
+  cloudprem-sa@PROJECT_ID.iam.gserviceaccount.com \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:PROJECT_ID.svc.id.goog[datadog-cloudprem/cloudprem-ksa]"
+
+kubectl annotate serviceaccount cloudprem-ksa \
+  -n datadog-cloudprem \
+  iam.gke.io/gcp-service-account=cloudprem-sa@PROJECT_ID.iam.gserviceaccount.com
+```
+
+#### Step 5: Create Kubernetes Secrets
+
+```bash
+# Create namespace if not already created
+kubectl create namespace datadog-cloudprem
+
+# Datadog API keys
+kubectl create secret generic datadog-secret \
+  --from-literal=api-key='YOUR_DD_API_KEY' \
+  --from-literal=app-key='YOUR_DD_APP_KEY' \
+  -n datadog-cloudprem
+
+# PostgreSQL connection (IMPORTANT: URL-encode password special characters)
+# / → %2F, + → %2B, = → %3D, @ → %40, : → %3A
+kubectl create secret generic cloudprem-metastore-uri \
+  --from-literal=QW_METASTORE_URI="postgresql://postgres:URL_ENCODED_PASSWORD@DB_HOST:5432/cloudprem" \
+  -n datadog-cloudprem
+```
+
+#### Step 6: Install CloudPrem with Helm
+
+**Add Datadog Helm repository:**
+```bash
+helm repo add datadog https://helm.datadoghq.com
+helm repo update
+```
+
+**Create values.yaml file** (customize for your platform):
 
    **Common configuration:**
    ```yaml
@@ -247,20 +475,194 @@ Guide users through:
        storageClassName: fast-ssd  # or local-path
    ```
 
-4. **Install CloudPrem**:
-   ```bash
-   helm upgrade --install cloudprem datadog/cloudprem \
-     -n <NAMESPACE> \
-     -f datadog-values.yaml
-   ```
+**Install CloudPrem:**
+```bash
+helm install cloudprem datadog/cloudprem \
+  -n datadog-cloudprem \
+  -f values.yaml \
+  --timeout 10m \
+  --wait
+```
 
-5. **Verify installation**:
-   ```bash
-   kubectl get pods -n <NAMESPACE>
-   kubectl get ingress -n <NAMESPACE>
-   kubectl get services -n <NAMESPACE>
-   kubectl get pvc -n <NAMESPACE>
-   ```
+**Verify pods are running:**
+```bash
+kubectl get pods -n datadog-cloudprem
+```
+
+Expected output - all pods should be Running:
+```
+NAME                                   READY   STATUS    RESTARTS   AGE
+cloudprem-control-plane-xxx            1/1     Running   0          5m
+cloudprem-indexer-0                    1/1     Running   0          5m
+cloudprem-indexer-1                    1/1     Running   0          5m
+cloudprem-janitor-xxx                  1/1     Running   0          5m
+cloudprem-metastore-xxx                1/1     Running   0          5m
+cloudprem-searcher-0                   1/1     Running   0          5m
+```
+
+#### Step 7: Install Datadog Cluster Agent
+
+**CRITICAL**: Install the Datadog Cluster Agent to:
+1. Collect CloudPrem metrics via DogStatsD
+2. Forward CloudPrem logs to Datadog or back to CloudPrem itself
+3. Monitor CloudPrem health and performance
+
+**Create datadog-agent-values.yaml:**
+```yaml
+datadog:
+  apiKey: YOUR_DD_API_KEY
+  site: datadoghq.com  # or datadoghq.eu, us3.datadoghq.com, us5.datadoghq.com
+
+  # Enable DogStatsD for CloudPrem metrics
+  dogstatsd:
+    port: 8125
+    useHostPort: true
+    nonLocalTraffic: true
+
+  # Forward logs to CloudPrem
+  logs:
+    enabled: true
+    containerCollectAll: true
+
+  # Optional: Send logs back to CloudPrem instead of Datadog
+  # Uncomment this section if you want CloudPrem to receive its own logs
+  # logsConfig:
+  #   use_http: true
+  #   logs_dd_url: "cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280"
+  #   logs_no_ssl: true
+
+  # APM/Tracing (optional)
+  apm:
+    portEnabled: true
+    port: 8126
+
+  # Process monitoring
+  processAgent:
+    enabled: true
+    processCollection: true
+
+clusterAgent:
+  enabled: true
+  replicas: 2
+
+agents:
+  enabled: true
+
+  # Tolerate all taints to monitor all nodes
+  tolerations:
+    - operator: Exists
+
+  # Set resources for the agent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+```
+
+**Install Datadog Agent:**
+```bash
+helm install datadog-agent datadog/datadog \
+  -n datadog-cloudprem \
+  -f datadog-agent-values.yaml \
+  --wait
+```
+
+**Verify Datadog Agent installation:**
+```bash
+kubectl get pods -n datadog-cloudprem -l app=datadog-agent
+kubectl logs -n datadog-cloudprem -l app=datadog-agent --tail=50
+```
+
+**Configure CloudPrem to send metrics to DogStatsD:**
+
+The CloudPrem Helm chart should already be configured to send metrics to DogStatsD. Verify in your `values.yaml`:
+```yaml
+environment:
+  DD_AGENT_HOST:
+    valueFrom:
+      fieldRef:
+        fieldPath: status.hostIP
+  DD_DOGSTATSD_PORT: "8125"
+```
+
+If not present, update your CloudPrem values and upgrade:
+```bash
+helm upgrade cloudprem datadog/cloudprem \
+  -n datadog-cloudprem \
+  -f values.yaml
+```
+
+#### Step 8: Verify Deployment and Check Metrics
+
+**Check all resources:**
+```bash
+kubectl get all -n datadog-cloudprem
+kubectl get pvc -n datadog-cloudprem
+kubectl get ingress -n datadog-cloudprem
+```
+
+**Verify metastore database connection:**
+```bash
+kubectl logs -n datadog-cloudprem -l app.kubernetes.io/component=metastore --tail=50
+```
+Look for successful connection messages, no "connection refused" or "timeout" errors.
+
+**Verify storage access:**
+```bash
+kubectl logs -n datadog-cloudprem -l app.kubernetes.io/component=indexer --tail=50
+```
+Check for successful writes to object storage (S3/GCS/Blob).
+
+**Check CloudPrem metrics in Datadog:**
+1. Go to https://app.datadoghq.com/metric/explorer
+2. Search for `cloudprem.*` metrics
+3. Verify metrics are flowing (may take 2-3 minutes)
+
+**Test ingestion (optional):**
+```bash
+kubectl port-forward -n datadog-cloudprem svc/cloudprem-indexer 7280:7280
+
+# Send test log
+curl -X POST http://localhost:7280/api/v1/logs \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Test log from CloudPrem","service":"test"}'
+```
+
+#### Step 9: Cleanup (When Needed)
+
+**To completely remove CloudPrem and all resources:**
+
+```bash
+# Uninstall Datadog Agent
+helm uninstall datadog-agent -n datadog-cloudprem
+
+# Uninstall CloudPrem
+helm uninstall cloudprem -n datadog-cloudprem
+
+# Delete namespace and all resources
+kubectl delete namespace datadog-cloudprem
+
+# Delete cloud resources
+# AWS
+aws rds delete-db-instance --db-instance-identifier cloudprem-postgres --skip-final-snapshot
+aws s3 rb s3://cloudprem-data-YOUR_ACCOUNT_ID --force
+eksctl delete cluster --name cloudprem-cluster --region us-east-1
+
+# Azure
+az postgres flexible-server delete --resource-group cloudprem-rg --name cloudprem-postgres --yes
+az storage account delete --name cloudpremdata --resource-group cloudprem-rg --yes
+az aks delete --resource-group cloudprem-rg --name cloudprem-cluster --yes --no-wait
+
+# GCP
+gcloud sql instances delete cloudprem-postgres --quiet
+gsutil -m rm -r gs://cloudprem-data-PROJECT_ID
+gcloud container clusters delete cloudprem-cluster --region us-central1 --quiet
+
+# Delete IAM resources (service accounts, roles, policies)
+```
 
 ---
 
