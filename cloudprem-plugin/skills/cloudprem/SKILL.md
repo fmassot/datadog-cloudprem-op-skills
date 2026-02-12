@@ -666,6 +666,291 @@ gcloud container clusters delete cloudprem-cluster --region us-central1 --quiet
 
 ---
 
+## Next Step: Install Observability Pipelines
+
+Once CloudPrem is running, a common next step is to deploy **Observability Pipelines (OP)** to process, filter, and route logs to CloudPrem.
+
+### Why Observability Pipelines with CloudPrem?
+
+Observability Pipelines acts as a log processing layer that:
+- **Filters and samples** logs before they reach CloudPrem (reduce costs, noise)
+- **Redacts sensitive data** (PII scrubbing, credit cards, SSNs)
+- **Enriches logs** with additional metadata
+- **Routes to multiple destinations** (dual-ship to CloudPrem + Datadog, or CloudPrem + S3)
+- **Provides buffering** and reliability for log delivery
+- **Reduces indexing load** by preprocessing logs
+
+### Architecture: OP → CloudPrem
+
+```
+Applications → Observability Pipelines → CloudPrem Indexer → CloudPrem Storage
+                    ↓
+              (optional) → Datadog/S3/Other
+```
+
+### Quick Installation Guide
+
+**Prerequisites:**
+- CloudPrem already deployed and verified (Steps 1-8 above)
+- CloudPrem indexer endpoint accessible (e.g., `cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280`)
+
+**Step 1: Create OP namespace**
+```bash
+kubectl create namespace observability-pipelines
+```
+
+**Step 2: Create OP pipeline via Datadog API**
+
+Use the Datadog API to create a pipeline configuration:
+
+```bash
+# Set your Datadog credentials
+export DD_API_KEY="your-api-key"
+export DD_APP_KEY="your-app-key"
+export DD_SITE="datadoghq.com"  # or datadoghq.eu, etc.
+
+# Get CloudPrem indexer endpoint
+export CLOUDPREM_ENDPOINT="cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280"
+
+# Create pipeline
+curl -X POST "https://api.${DD_SITE}/api/v2/observability_pipelines/pipelines" \
+  -H "DD-API-KEY: ${DD_API_KEY}" \
+  -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": {
+      "attributes": {
+        "name": "logs-to-cloudprem",
+        "is_enabled": true,
+        "config": {
+          "sources": {
+            "http_server": {
+              "type": "http_server",
+              "address": "0.0.0.0:8282",
+              "encoding": "json"
+            }
+          },
+          "transforms": {
+            "filter_debug": {
+              "type": "filter",
+              "inputs": ["http_server"],
+              "condition": ".level != \"debug\""
+            },
+            "sample_logs": {
+              "type": "sample",
+              "inputs": ["filter_debug"],
+              "rate": 10
+            }
+          },
+          "sinks": {
+            "cloudprem": {
+              "type": "http",
+              "inputs": ["sample_logs"],
+              "uri": "http://'${CLOUDPREM_ENDPOINT}'/api/v2/logs",
+              "method": "post",
+              "encoding": {
+                "codec": "json"
+              },
+              "batch": {
+                "max_bytes": 1048576,
+                "timeout_secs": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }'
+```
+
+Save the pipeline ID from the response:
+```bash
+export PIPELINE_ID="<pipeline-id-from-response>"
+```
+
+**Step 3: Install OP Worker with Helm**
+
+```bash
+helm repo add datadog https://helm.datadoghq.com
+helm repo update
+
+helm install opw datadog/observability-pipelines-worker \
+  -n observability-pipelines \
+  --set datadog.apiKey="${DD_API_KEY}" \
+  --set datadog.pipelineId="${PIPELINE_ID}" \
+  --set datadog.site="${DD_SITE}" \
+  --set replicaCount=3 \
+  --set resources.requests.cpu="1" \
+  --set resources.requests.memory="2Gi" \
+  --set resources.limits.cpu="2" \
+  --set resources.limits.memory="4Gi"
+```
+
+**Step 4: Verify OP deployment**
+
+```bash
+# Check pods
+kubectl get pods -n observability-pipelines
+
+# Check logs
+kubectl logs -n observability-pipelines -l app.kubernetes.io/name=observability-pipelines-worker --tail=50
+
+# Check pipeline is pulling config
+kubectl logs -n observability-pipelines -l app.kubernetes.io/name=observability-pipelines-worker | grep -i "pipeline"
+```
+
+**Step 5: Test log flow through OP to CloudPrem**
+
+```bash
+# Port-forward OP
+kubectl port-forward -n observability-pipelines svc/opw-observability-pipelines-worker 8282:8282
+
+# Send test log
+curl -X POST http://localhost:8282 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Test log via OP to CloudPrem",
+    "service": "test-service",
+    "level": "info",
+    "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"
+  }'
+
+# Verify in CloudPrem
+kubectl logs -n datadog-cloudprem -l app.kubernetes.io/component=indexer --tail=20
+```
+
+**Step 6: Expose OP for applications**
+
+Create a LoadBalancer or Ingress for your applications to send logs:
+
+```bash
+# Option 1: LoadBalancer (cloud providers)
+kubectl expose deployment opw-observability-pipelines-worker \
+  -n observability-pipelines \
+  --type=LoadBalancer \
+  --port=8282 \
+  --target-port=8282 \
+  --name=opw-public
+
+# Get external IP
+kubectl get svc opw-public -n observability-pipelines
+
+# Option 2: Internal service (for in-cluster apps)
+# Already created by Helm as ClusterIP service
+kubectl get svc -n observability-pipelines
+```
+
+### Common OP Pipeline Configurations for CloudPrem
+
+**1. Simple forwarding with filtering:**
+```json
+{
+  "sources": {
+    "http_server": {"type": "http_server", "address": "0.0.0.0:8282"}
+  },
+  "transforms": {
+    "filter_debug": {
+      "type": "filter",
+      "inputs": ["http_server"],
+      "condition": ".level != \"debug\""
+    }
+  },
+  "sinks": {
+    "cloudprem": {
+      "type": "http",
+      "inputs": ["filter_debug"],
+      "uri": "http://cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280/api/v2/logs"
+    }
+  }
+}
+```
+
+**2. Dual-shipping (CloudPrem + Datadog):**
+```json
+{
+  "sources": {
+    "http_server": {"type": "http_server", "address": "0.0.0.0:8282"}
+  },
+  "sinks": {
+    "cloudprem": {
+      "type": "http",
+      "inputs": ["http_server"],
+      "uri": "http://cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280/api/v2/logs"
+    },
+    "datadog": {
+      "type": "datadog_logs",
+      "inputs": ["http_server"],
+      "default_api_key": "${DD_API_KEY}",
+      "site": "datadoghq.com"
+    }
+  }
+}
+```
+
+**3. PII redaction before CloudPrem:**
+```json
+{
+  "sources": {
+    "http_server": {"type": "http_server", "address": "0.0.0.0:8282"}
+  },
+  "transforms": {
+    "redact_pii": {
+      "type": "remap",
+      "inputs": ["http_server"],
+      "source": "
+        .message = redact(.message, filters: [r'\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b'], redactor: \"[REDACTED-SSN]\")
+        .message = redact(.message, filters: [r'\\b[0-9]{16}\\b'], redactor: \"[REDACTED-CC]\")
+      "
+    }
+  },
+  "sinks": {
+    "cloudprem": {
+      "type": "http",
+      "inputs": ["redact_pii"],
+      "uri": "http://cloudprem-indexer.datadog-cloudprem.svc.cluster.local:7280/api/v2/logs"
+    }
+  }
+}
+```
+
+### Monitoring OP → CloudPrem Flow
+
+**Key metrics to monitor:**
+```bash
+# OP metrics (in Datadog)
+- observability_pipelines.source.http_server.events_in_total
+- observability_pipelines.sink.cloudprem.events_out_total
+- observability_pipelines.sink.cloudprem.errors_total
+
+# CloudPrem indexer metrics
+- cloudprem.indexer.docs_processed_total
+- cloudprem.indexer.ingest_api_requests_total
+```
+
+**Check in Datadog:**
+1. Go to https://app.datadoghq.com/metric/explorer
+2. Search for `observability_pipelines.*` to verify OP metrics
+3. Search for `cloudprem.*` to verify CloudPrem is receiving logs
+
+### For More Details
+
+For comprehensive OP deployment, scaling, and advanced configurations, use:
+```
+/observability-pipelines
+```
+
+Or ask: "Help me configure Observability Pipelines with [specific requirement]"
+
+The **observability-pipelines skill** includes:
+- Multi-platform deployment (EC2, Fargate, EKS, AKS, GKE, K8s)
+- Advanced pipeline configurations (sampling, parsing, enrichment)
+- Scaling and autoscaling strategies
+- Debugging and troubleshooting
+- Monitoring and alerting
+- Upgrades and maintenance
+
+---
+
 ## Scaling Operations
 
 ### Manual scaling
