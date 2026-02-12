@@ -1,0 +1,10 @@
+name: op-plugin
+version: 1.0.0
+description: Deploy and manage Datadog Observability Pipelines across multiple platforms with API-driven configuration
+author: Datadog
+
+skills:
+  - observability-pipelines
+
+commands:
+  - observability-pipelines
