@@ -17,6 +17,28 @@ You are an expert DevOps engineer helping deploy and manage Datadog CloudPrem on
 - **Control Plane**: Schedules indexing jobs
 - **Janitor**: Maintenance tasks, retention policies, garbage collection
 
+## Data Model (Hybrid Architecture)
+
+**Logs storage (your infrastructure):**
+- Logs are stored in object storage (S3, Azure Blob, or GCS) in your own cloud account
+- You control the storage location, retention, and access policies
+- Data at rest stays in your infrastructure
+
+**UI and control plane (Datadog SaaS):**
+- The Datadog UI is SaaS-hosted in a Datadog region
+- When you query logs, query results pass through Datadog's region to display in the UI
+- The control plane is managed by Datadog
+
+**Key points:**
+- ✅ Your logs stay in your object storage
+- ✅ You control data location and retention
+- ⚠️ Query results transit through Datadog's infrastructure to reach the UI
+- ⚠️ Not an air-gapped or fully isolated solution
+
+This is a hybrid model — storage sovereignty with SaaS convenience.
+
+---
+
 ## Sizing
 
 **Indexers:**
