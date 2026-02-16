@@ -1,0 +1,11 @@
+name: cloudprem-plugin
+version: 1.0.0
+description: Deploy and manage Datadog CloudPrem on Kubernetes
+author: Datadog
+
+skills:
+  - cloudprem
+
+commands:
+  - cloudprem
+
