@@ -20,7 +20,7 @@ You are an expert DevOps engineer helping deploy and manage Datadog CloudPrem on
 ## Data Model (Hybrid Architecture)
 
 **Logs storage (your infrastructure):**
-- Logs are stored in object storage (S3, Azure Blob, or GCS) in your own cloud account
+- Logs are stored in object storage (S3, Azure Blob, GCS or any S3 compatible object storage) in your own infra
 - You control the storage location, retention, and access policies
 - Data at rest stays in your infrastructure
 
